@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 import time
 import pickle
 import copy
+import michaels_functions as mf
 
 
 def load(filename, directory=None):
@@ -1551,7 +1552,7 @@ class FoKL:
             siglik = np.var(data - np.matmul(X, betahat))
 
             lik = -(n / 2) * np.log(siglik) - (n - 1) / 2
-            ev = (mmtx + 1) * np.log(n) - 2 * np.max(lik)
+            ev = 3*(mmtx + 1) * np.log(n) - 2 * np.max(lik)
 
             X = X[:, 0:mmtx + 1]
 
@@ -1592,159 +1593,124 @@ class FoKL:
         X = []
         killset = []
         killtest = []
-        if m == 1:
-            sett = 1
-        elif way3:
-            sett = 3
-        else:
-            sett = 2
 
         while True:
-            # first we have to come up with all combinations of 'm' integers that
-            # sums up to ind
-            indvec = np.zeros((m))
-            summ = ind
+            # Generate interaction terms for the current 'ind' (degree)
+            # This replaces the old 'indvec' generation and inner 'while 1' loop
+            current_ind_terms = mf.generate_interaction_matrix(m, ind, np.array(relats_in))
 
-            while summ:
-                for j in range(0,sett):
-                    indvec[j] = indvec[j] + 1
-                    summ = summ - 1
-                    if summ == 0:
-                        break
+            # 'vm' represents the number of terms generated in the current iteration for 'ind'
+            vm = current_ind_terms.shape[0]
 
-            while True:
-                vecs = np.unique(perms(indvec),axis=0)
-                if ind > 1:
-                    mvec, nvec = np.shape(vecs)
+            # Append the newly generated terms to the cumulative interaction matrix (damtx)
+            if vm > 0: # Only append if there are terms for this 'ind'
+                # If damtx is empty, assign directly; otherwise, stack vertically
+                if damtx.size == 0:
+                    damtx = current_ind_terms
                 else:
-                    mvec = np.shape(vecs)[0]
-                    nvec = 1
-                killvecs = []
-                if mrel != 0:
-                    for j in range(1, mvec):
-                        testvec = np.divide(vecs[j, :], vecs[j, :])
-                        testvec[np.isnan(testvec)] = 0
-                        for k in range(1, mrel):
-                            if sum(testvec == relats[k, :]) == m:
-                                killvecs.append(j)
-                                break
-                    nuvecs = np.zeros(mvec - np.size(killvecs), m)
-                    vecind = 1
-                    for j in range(1, mvec):
-                        if not (j == killvecs):
-                            nuvecs[vecind, :] = vecs[j, :]
-                            vecind = vecind + 1
+                    damtx = np.vstack((damtx, current_ind_terms))
 
-                    vecs = nuvecs
-                if ind > 1:
-                    vm, vn = np.shape(vecs)
-                else:
-                    vm = np.shape(vecs)[0]
-                    vn = 1
-                if np.size(damtx) == 0:
-                    damtx = vecs
-                else:
-                    damtx = np.append(damtx, vecs, axis=0)
-                [dam, null] = np.shape(damtx)
+            # 'dam' represents the total number of terms in the cumulative interaction matrix
+            dam = damtx.shape[0]
 
-                [beters, null, null, null, xers, ev] = gibbs(inputs, data, phis, X, damtx, a, b, atau, btau, draws,
-                                                             phind, xsm, sigsqd0, tausqd0, dtd)
+            # If this code is part of a class, you might update a class attribute here
+            # self.discmtx = damtx.astype(int)
+            # print(damtx) # Optional: print the current state of the cumulative matrix
 
-                if aic:
-                    ev = ev + (2 - np.log(n)) * (dam + 1)
+            # --- Original code from your snippet continues below, now using the updated damtx, dam, and vm ---
+            [beters, null_val1, null_val2, null_val3, xers, ev] = gibbs(inputs, data, phis, X, damtx, a, b, atau, btau, draws,
+                                                                    phind, xsm, sigsqd0, tausqd0, dtd)
 
-                betavs = np.abs(np.mean(beters[int(np.ceil((draws / 2)+1)):draws, (dam - vm + 1):dam+1], axis=0))
-                betavs2 = np.divide(np.std(np.array(beters[int(np.ceil(draws/2)+1):draws, dam-vm+1:dam+1]), axis=0),
-                    np.abs(np.mean(beters[int(np.ceil(draws / 2)):draws, dam-vm+1:dam+2], axis=0)))
-                    # betavs2 error in std deviation formatting
-                betavs3 = np.array(range(dam-vm+2, dam+2))
-                betavs = np.transpose(np.array([betavs,betavs2, betavs3]))
-                if np.shape(betavs)[1] > 0:
-                    sortInds = np.argsort(betavs[:, 0])
-                    betavs = betavs[sortInds]
+            if aic:
+                ev = ev + (2 - np.log(n)) * (dam + 1)
 
-                killset = []
-                evmin = ev
+            # Ensure beters slicing is correct given 'dam' and 'vm'
+            # The original slicing (dam - vm + 1):dam+1 implies 1-based indexing or a specific slice logic.
+            # Python uses 0-based indexing. Assuming 'dam - vm' is the start index of current terms in beters.
+            betavs = np.abs(np.mean(beters[int(np.ceil((draws / 2)+1)):draws, (dam - vm):dam], axis=0))
+            betavs2 = np.divide(np.std(np.array(beters[int(np.ceil(draws/2)+1):draws, (dam - vm):dam]), axis=0),
+                                np.abs(np.mean(beters[int(np.ceil(draws / 2)):draws, (dam - vm):dam], axis=0)))
+            # betavs2 error in std deviation formatting - this comment was in your original code
+            # betavs3 needs to reflect the actual indices in the current 'damtx'
+            # It should be the indices of the *newly added* terms within the full damtx.
+            # If vm > 0, these are indices from (dam - vm) to (dam - 1)
+            betavs3 = np.array(range(dam - vm, dam)) # Corrected to be 0-indexed for vm terms
+            betavs = np.transpose(np.array([betavs, betavs2, betavs3]))
 
-                for i in range(0, vm):
-                    if betavs[i, 1] > threshstdb or betavs[i, 1] > threshstda and betavs[i, 0] < threshav * \
-                            np.mean(np.abs(np.mean(beters[int(np.ceil(draws/2)):draws, 0]))):  # index to 'beters'
+            if np.shape(betavs)[1] > 0: # Check if betavs has columns (i.e., terms were generated)
+                sortInds = np.argsort(betavs[:, 0])
+                betavs = betavs[sortInds]
 
-                        killtest = np.append(killset, (betavs[i, 2] - 1))
-                        if killtest.size > 1:
-                            killtest[::-1].sort()  # max to min so damtx_test rows get deleted in order of end to start
-                        damtx_test = damtx
-                        for k in range(0, np.size(killtest)):
-                            damtx_test = np.delete(damtx_test, int(np.array(killtest[k])-1), 0)
-                        damtest, null = np.shape(damtx_test)
+            killset = []
+            evmin = ev
 
-                        [betertest, null, null, null, Xtest, evtest] = gibbs(inputs, data, phis, X, damtx_test, a, b,
-                                                                             atau, btau, draws, phind, xsm, sigsqd0,
-                                                                             tausqd0, dtd)
-                        if aic:
-                            evtest = evtest + (2 - np.log(n))*(damtest+1)
-                        if evtest < evmin:
-                            killset = killtest
-                            evmin = evtest
-                            xers = Xtest
-                            beters = betertest
-                for k in range(0, np.size(killset)):
-                    damtx = np.delete(damtx, int(np.array(killset[k]) - 1), 0)
+            for i in range(0, vm): # Iterate through the terms added in this 'ind' iteration
+                # Original condition for killing terms
+                if betavs[i, 1] > threshstdb or (betavs[i, 1] > threshstda and betavs[i, 0] < threshav *
+                                                np.mean(np.abs(np.mean(beters[int(np.ceil(draws/2)):draws, 0])))):
 
-                ev = evmin
-                X = xers
+                    # The index to kill is betavs[i, 2], which is now 0-indexed relative to the full damtx
+                    # No need for -1 conversion if betavs3 is 0-indexed.
+                    killtest = np.append(killset, betavs[i, 2])
+                    if killtest.size > 1:
+                        # Sort descending to delete from end to start, preventing index shifts
+                        killtest = np.sort(killtest)[::-1]
 
-                if self.ConsoleOutput:
-                    if data.dtype != np.float64:  # if large dataset, then 'Gibbs: 100.00%' printed from inside gibbs
-                        sys.stdout.write('\r')  # place cursor at start of line to erase 'Gibbs: 100.00%'
-                    print([ind, float(ev)])
-                if np.size(evs) > 0:
-                    if ev < np.min(evs):
+                    damtx_test = np.copy(damtx) # Create a copy to test deletion without modifying original damtx yet
+                    for k_idx in range(0, np.size(killtest)):
+                        damtx_test = np.delete(damtx_test, int(killtest[k_idx]), 0) # Use 0-indexed killtest directly
+                    damtest, null_val4 = np.shape(damtx_test)
 
-                        betas = beters
-                        mtx = damtx
-                        greater = 1
-                        evs = np.append(evs, ev)
+                    [betertest, null_val5, null_val6, null_val7, Xtest, evtest] = gibbs(inputs, data, phis, X, damtx_test, a, b,
+                                                                                    atau, btau, draws, phind, xsm, sigsqd0,
+                                                                                    tausqd0, dtd)
+                    if aic:
+                        evtest = evtest + (2 - np.log(n))*(damtest+1)
+                    if evtest < evmin:
+                        killset = killtest # Update killset if this test model is better
+                        evmin = evtest
+                        xers = Xtest
+                        beters = betertest
 
-                    elif greater < tolerance:
-                        greater = greater + 1
-                        evs = np.append(evs, ev)
-                    else:
-                        finished = 1
-                        evs = np.append(evs, ev)
+            # Apply the final killset to the main damtx after evaluating all potential removals
+            for k_idx in range(0, np.size(killset)):
+                damtx = np.delete(damtx, int(killset[k_idx]), 0) # Use 0-indexed killset directly
 
-                        break
-                else:
-                    greater = greater + 1
+            ev = evmin
+            X = xers
+
+            if self.ConsoleOutput:
+                if data.dtype != np.float64:
+                    sys.stdout.write('\r')
+                print([ind, float(ev)])
+
+            if np.size(evs) > 0:
+                if ev < np.min(evs):
                     betas = beters
                     mtx = damtx
+                    greater = 1
                     evs = np.append(evs, ev)
-                if m == 1:
-                    break
-                elif way3:
-                    if indvec[1] > indvec[2]:
-                        indvec[0] = indvec[0] + 1
-                        indvec[1] = indvec[1] - 1
-                    elif indvec[2]:
-                        indvec[1] = indvec[1] + 1
-                        indvec[2] = indvec[2] - 1
-                        if indvec[1] > indvec[0]:
-                            indvec[0] = indvec[0] + 1
-                            indvec[1] = indvec[1] - 1
-                    else:
-                        break
-                elif indvec[1]:
-                    indvec[0] = indvec[0] + 1
-                    indvec[1] = indvec[1] - 1
+                elif greater < tolerance:
+                    greater = greater + 1
+                    evs = np.append(evs, ev)
                 else:
-                    break
+                    finished = 1
+                    evs = np.append(evs, ev)
+                    break # Break the main while True loop
+            else:
+                greater = greater + 1
+                betas = beters
+                mtx = damtx
+                evs = np.append(evs, ev)
 
+            # The old 'indvec' manipulation logic is completely removed.
+            # The 'ind' increment and loop break conditions are kept for the main loop.
             if finished != 0:
                 break
 
-            ind = ind + 1
+            ind = ind + 1 # Increment 'ind' to move to the next degree of interaction
 
-            if ind > len(phis):
+            if ind > len(phis): # Check if 'ind' has exceeded a maximum limit
                 break
 
         # Implementation of 'gimme' feature
