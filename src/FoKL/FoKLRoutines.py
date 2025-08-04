@@ -1348,11 +1348,12 @@ class FoKL:
                 btau = (scale / sigmasq) * (atau + 1)
                 self.btau = btau
 
-        def perms(x):
-            """Python equivalent of MATLAB perms."""
-            # from https://stackoverflow.com/questions/38130008/python-equivalent-for-matlabs-perms
-            a = np.vstack(list(itertools.permutations(x)))[::-1]
-            return a
+        # Legacy code: delete when no longer needed
+        # def perms(x):
+        #     """Python equivalent of MATLAB perms."""
+        #     # from https://stackoverflow.com/questions/38130008/python-equivalent-for-matlabs-perms
+        #     a = np.vstack(list(itertools.permutations(x)))[::-1]
+        #     return a
 
         # Prepare phind and xsm if using cubic splines, else match variable names required for gibbs argument
         if self.kernel == self.kernels[0]:  # == 'Cubic Splines':
@@ -1394,170 +1395,6 @@ class FoKL:
 
         # [END] initialization of constants
 
-        def gibbs(inputs, data, phis, Xin, discmtx, a, b, atau, btau, draws, phind, xsm, sigsqd, tausqd, dtd):
-            """
-            'inputs' is the set of normalized inputs -- both parameters and model
-            inputs -- with columns corresponding to inputs and rows the different
-            experimental designs. (numpy array)
-
-            'data' are the experimental results: column vector, with entries
-            corresponding to rows of 'inputs'
-
-            'phis' are a data structure with the coefficients for the basis
-            functions
-
-            'discmtx' is the interaction matrix for the bss-anova function -- rows
-            are terms in the function and columns are inputs (cols should line up
-            with cols in 'inputs'
-
-            'a' and 'b' are the parameters of the ig distribution for the
-            observation error variance of the data
-
-            'atau' and 'btau' are the parameters of the ig distribution for the 'tau
-            squared' parameter: the variance of the beta priors
-
-            'draws' is the total number of draws
-
-            Additional Constants (to avoid repeat calculations found in later development):
-                - phind
-                - xsm
-                - sigsqd
-                - tausqd
-                - dtd
-            """
-            # building the matrix by calculating the corresponding basis function outputs for each set of inputs
-            minp, ninp = np.shape(inputs)
-            phi_vec = []
-            if np.shape(discmtx) == ():  # part of fix for single input model
-                mmtx = 1
-            else:
-                mmtx, null = np.shape(discmtx)
-
-            if np.size(Xin) == 0:
-                Xin = np.ones((minp, 1))
-                mxin, nxin = np.shape(Xin)
-            else:
-                # X = Xin
-                mxin, nxin = np.shape(Xin)
-            if mmtx - nxin < 0:
-                X = Xin
-            else:
-                X = np.append(Xin, np.zeros((minp, mmtx - nxin)), axis=1)
-
-            for i in range(minp):  # for datapoint in training datapoints
-
-                # ------------------------------
-                # [IN DEVELOPMENT] PRINT PERCENT COMPLETION TO CONSOLE (reported to cause significant delay):
-                #
-                # if self.ConsoleOutput and data.dtype != np.float64:  # if large dataset, show progress for sanity check
-                #     percent = i / (minp - 1)
-                #     sys.stdout.write(f"Gibbs: {round(100 * percent, 2):.2f}%")  # show percent of data looped through
-                #     sys.stdout.write('\r')  # set cursor at beginning of console output line (such that next iteration
-                #         # of Gibbs progress (or [ind, ev] if at end) overwrites current Gibbs progress)
-                #     sys.stdout.flush()
-                #
-                # [END]
-                # ----------------------------
-                
-                for j in range(nxin, mmtx + 1):
-                    null, nxin2 = np.shape(X)
-                    if j == nxin2:
-                        X = np.append(X, np.zeros((minp, 1)), axis=1)
-
-                    phi = 1
-
-                    for k in range(ninp):  # for input var in input vars
-
-                        if np.shape(discmtx) == ():
-                            num = discmtx
-                        else:
-                            num = discmtx[j - 1][k]
-
-                        if num != 0:  # enter if loop if num is nonzero
-                            nid = int(num - 1)
-
-                            # Evaluate basis function:
-                            if self.kernel == self.kernels[0]:  # == 'Cubic Splines':
-                                coeffs = [phis[nid][order][phind[i, k]] for order in range(4)]  # coefficients for cubic
-                            elif self.kernel == self.kernels[1]:  # == 'Bernoulli Polynomials':
-                                coeffs = phis[nid]  # coefficients for bernoulli
-                            phi = phi * self.evaluate_basis(coeffs, xsm[i, k])  # multiplies phi(x0)*phi(x1)*etc.
-
-                    X[i][j] = phi
-
-            # # initialize tausqd at the mode of its prior: the inverse of the mode of sigma squared, such that the
-            # # initial variance for the betas is 1
-            # sigsqd = b / (1 + a)
-            # tausqd = btau / (1 + atau)
-
-            XtX = np.transpose(X).dot(X)
-
-            Xty = np.transpose(X).dot(data)
-
-            # See the link:
-            #     - "https://stackoverflow.com/questions/8765310/scipy-linalg-eig-return-complex-eigenvalues-for-
-            #        covariance-matrix"
-            Lamb, Q = eigh(XtX)  # using scipy eigh function to avoid imaginary values due to numerical errors
-            # Lamb, Q = LA.eig(XtX)
-
-            Lamb_inv = np.diag(1 / Lamb)
-
-            betahat = Q.dot(Lamb_inv).dot(np.transpose(Q)).dot(Xty)
-            squerr = LA.norm(data - X.dot(betahat)) ** 2
-
-            n = len(data)
-            astar = a + 1 + n / 2 + (mmtx + 1) / 2
-
-            atau_star = atau + mmtx / 2
-
-            # Gibbs iterations
-
-            betas = np.zeros((draws, mmtx + 1))
-            sigs = np.zeros((draws, 1))
-            taus = np.zeros((draws, 1))
-            lik = np.zeros((draws, 1))
-
-            for k in range(draws):
-
-                Lamb_tausqd = np.diag(Lamb) + (1 / tausqd) * np.identity(mmtx + 1)
-                Lamb_tausqd_inv = np.diag(1 / np.diag(Lamb_tausqd))
-
-                mun = Q.dot(Lamb_tausqd_inv).dot(np.transpose(Q)).dot(Xty)
-                S = Q.dot(np.diag(np.diag(Lamb_tausqd_inv) ** (1 / 2)))
-
-                vec = np.random.normal(loc=0, scale=1, size=(mmtx + 1, 1))  # drawing from normal distribution
-                betas[k][:] = np.transpose(mun + sigsqd ** (1 / 2) * (S).dot(vec))
-
-                vecc = mun - np.reshape(betas[k][:], (len(betas[k][:]), 1))
-
-                bstar = b + 0.5 * (betas[k][:].dot(XtX.dot(np.transpose([betas[k][:]]))) - 2 * betas[k][:].dot(Xty) +
-                                   dtd + betas[k][:].dot(np.transpose([betas[k][:]])) / tausqd)
-                # bstar = b + comp1.dot(comp2) + 0.5 * dtd - comp3;
-
-                # Returning a 'not a number' constant if bstar is negative, which would
-                # cause np.random.gamma to return a ValueError
-                if bstar < 0:
-                    sigsqd = math.nan
-                else:
-                    sigsqd = 1 / np.random.gamma(astar, 1 / bstar)
-
-                sigs[k] = sigsqd
-
-                btau_star = (1/(2*sigsqd)) * (betas[k][:].dot(np.reshape(betas[k][:], (len(betas[k][:]), 1)))) + btau
-
-                tausqd = 1 / np.random.gamma(atau_star, 1 / btau_star)
-                taus[k] = tausqd
-
-            # Calculate the evidence
-            siglik = np.var(data - np.matmul(X, betahat))
-
-            lik = -(n / 2) * np.log(siglik) - (n - 1) / 2
-            ev = 3*(mmtx + 1) * np.log(n) - 2 * np.max(lik)
-
-            X = X[:, 0:mmtx + 1]
-
-            return betas, sigs, taus, betahat, X, ev
-
         # 'n' is the number of datapoints whereas 'm' is the number of inputs
         n, m = np.shape(inputs)
         mrel = n
@@ -1595,128 +1432,166 @@ class FoKL:
         killtest = []
 
         while True:
-            # Generate interaction terms for the current 'ind' (degree)
-            # This replaces the old 'indvec' generation and inner 'while 1' loop
-            current_ind_terms = mf.generate_interaction_matrix(m, ind, np.array(relats_in))
-
-            # 'vm' represents the number of terms generated in the current iteration for 'ind'
-            vm = current_ind_terms.shape[0]
-
-            # Append the newly generated terms to the cumulative interaction matrix (damtx)
-            if vm > 0: # Only append if there are terms for this 'ind'
-                # If damtx is empty, assign directly; otherwise, stack vertically
+            # Get all entropy levels for the current 'ind' (degree)
+            entropy_levels_info = mf.get_entropy_levels(m, ind)
+            
+            if not entropy_levels_info:
+                # No terms possible for this ind, move to next
+                ind = ind + 1
+                if ind > len(phis):
+                    break
+                continue
+            
+            # Process each entropy level from highest to lowest
+            for entropy_level, entropy_value, example_partitions in entropy_levels_info:
+                if self.ConsoleOutput:
+                    print(f"Processing ind={ind}, entropy_level={entropy_level} (entropy={entropy_value:.3f})")
+                
+                # Generate interaction terms for the current 'ind' and entropy level
+                current_ind_terms = mf.generate_interaction_matrix_by_entropy(m, ind, np.array(relats_in), 
+                                                                            entropy_level=entropy_level)
+                
+                # 'vm' represents the number of terms generated in the current entropy level
+                vm = current_ind_terms.shape[0]
+                
+                if vm == 0:
+                    # No terms for this entropy level, continue to next
+                    continue
+                
+                # Store the current state before adding new terms
+                damtx_before = damtx.copy() if damtx.size > 0 else np.array([]).reshape(0, m)
+                dam_before = damtx_before.shape[0]
+                
+                # Append the newly generated terms to the cumulative interaction matrix (damtx)
                 if damtx.size == 0:
                     damtx = current_ind_terms
                 else:
                     damtx = np.vstack((damtx, current_ind_terms))
+                
+                # 'dam' represents the total number of terms in the cumulative interaction matrix
+                dam = damtx.shape[0]
+                
+                # Run Gibbs sampling with the updated damtx
+                # [beters, null_val1, null_val2, null_val3, xers, ev] = mf.gibbs(inputs, data, phis, X, damtx, a, b, atau, btau, draws,
+                #                                                         phind, xsm, sigsqd0, tausqd0, dtd)
+                
+                [ev, betahat_test, xers] = mf.calculate_bic(inputs, data, phis, X, damtx, phind, xsm, kernel='Cubic Splines')
+                # print(ev_test)
+                
+                if aic:
+                    ev = ev + (2 - np.log(n)) * (dam + 1)
+                
+                # # Analyze only the newly added terms from this entropy level
+                # betavs = np.abs(np.mean(beters[int(np.ceil((draws / 2)+1)):draws, (dam - vm):dam], axis=0))
+                # betavs2 = np.divide(np.std(np.array(beters[int(np.ceil(draws/2)+1):draws, (dam - vm):dam]), axis=0),
+                #                     np.abs(np.mean(beters[int(np.ceil(draws / 2)):draws, (dam - vm):dam], axis=0)))
+                
+                # # betavs3 contains the indices of the newly added terms
+                # betavs3 = np.array(range(dam - vm, dam))
+                # betavs = np.transpose(np.array([betavs, betavs2, betavs3]))
+                
+                # if np.shape(betavs)[1] > 0:
+                #     sortInds = np.argsort(betavs[:, 0])
+                #     betavs = betavs[sortInds]
+                
+                # killset = []
+                # evmin = ev
+                
+                # # Test removal of terms from this entropy level
+                # for i in range(0, vm):
+                #     if betavs[i, 1] > threshstdb or (betavs[i, 1] > threshstda and betavs[i, 0] < threshav *
+                #                                     np.mean(np.abs(np.mean(beters[int(np.ceil(draws/2)):draws, 0])))):
+                        
+                #         killtest = np.append(killset, betavs[i, 2])
+                #         if killtest.size > 1:
+                #             killtest = np.sort(killtest)[::-1]
+                        
+                #         damtx_test = np.copy(damtx)
+                #         for k_idx in range(0, np.size(killtest)):
+                #             damtx_test = np.delete(damtx_test, int(killtest[k_idx]), 0)
+                #         damtest, null_val4 = np.shape(damtx_test)
+                        
+                #         [betertest, null_val5, null_val6, null_val7, Xtest, evtest] = mf.gibbs(inputs, data, phis, X, damtx_test, a, b,
+                #                                                                         atau, btau, draws, phind, xsm, sigsqd0,
+                #                                                                         tausqd0, dtd)
+                        
+                #         # [ev_test, betahat_test, xers] = mf.calculate_bic(inputs, data, phis, X, damtx_test, phind, xsm, kernel='Cubic Splines')
+                #         # print(ev_test)
 
-            # 'dam' represents the total number of terms in the cumulative interaction matrix
-            dam = damtx.shape[0]
-
-            # If this code is part of a class, you might update a class attribute here
-            # self.discmtx = damtx.astype(int)
-            # print(damtx) # Optional: print the current state of the cumulative matrix
-
-            # --- Original code from your snippet continues below, now using the updated damtx, dam, and vm ---
-            [beters, null_val1, null_val2, null_val3, xers, ev] = gibbs(inputs, data, phis, X, damtx, a, b, atau, btau, draws,
-                                                                    phind, xsm, sigsqd0, tausqd0, dtd)
-
-            if aic:
-                ev = ev + (2 - np.log(n)) * (dam + 1)
-
-            # Ensure beters slicing is correct given 'dam' and 'vm'
-            # The original slicing (dam - vm + 1):dam+1 implies 1-based indexing or a specific slice logic.
-            # Python uses 0-based indexing. Assuming 'dam - vm' is the start index of current terms in beters.
-            betavs = np.abs(np.mean(beters[int(np.ceil((draws / 2)+1)):draws, (dam - vm):dam], axis=0))
-            betavs2 = np.divide(np.std(np.array(beters[int(np.ceil(draws/2)+1):draws, (dam - vm):dam]), axis=0),
-                                np.abs(np.mean(beters[int(np.ceil(draws / 2)):draws, (dam - vm):dam], axis=0)))
-            # betavs2 error in std deviation formatting - this comment was in your original code
-            # betavs3 needs to reflect the actual indices in the current 'damtx'
-            # It should be the indices of the *newly added* terms within the full damtx.
-            # If vm > 0, these are indices from (dam - vm) to (dam - 1)
-            betavs3 = np.array(range(dam - vm, dam)) # Corrected to be 0-indexed for vm terms
-            betavs = np.transpose(np.array([betavs, betavs2, betavs3]))
-
-            if np.shape(betavs)[1] > 0: # Check if betavs has columns (i.e., terms were generated)
-                sortInds = np.argsort(betavs[:, 0])
-                betavs = betavs[sortInds]
-
-            killset = []
-            evmin = ev
-
-            for i in range(0, vm): # Iterate through the terms added in this 'ind' iteration
-                # Original condition for killing terms
-                if betavs[i, 1] > threshstdb or (betavs[i, 1] > threshstda and betavs[i, 0] < threshav *
-                                                np.mean(np.abs(np.mean(beters[int(np.ceil(draws/2)):draws, 0])))):
-
-                    # The index to kill is betavs[i, 2], which is now 0-indexed relative to the full damtx
-                    # No need for -1 conversion if betavs3 is 0-indexed.
-                    killtest = np.append(killset, betavs[i, 2])
-                    if killtest.size > 1:
-                        # Sort descending to delete from end to start, preventing index shifts
-                        killtest = np.sort(killtest)[::-1]
-
-                    damtx_test = np.copy(damtx) # Create a copy to test deletion without modifying original damtx yet
-                    for k_idx in range(0, np.size(killtest)):
-                        damtx_test = np.delete(damtx_test, int(killtest[k_idx]), 0) # Use 0-indexed killtest directly
-                    damtest, null_val4 = np.shape(damtx_test)
-
-                    [betertest, null_val5, null_val6, null_val7, Xtest, evtest] = gibbs(inputs, data, phis, X, damtx_test, a, b,
-                                                                                    atau, btau, draws, phind, xsm, sigsqd0,
-                                                                                    tausqd0, dtd)
-                    if aic:
-                        evtest = evtest + (2 - np.log(n))*(damtest+1)
-                    if evtest < evmin:
-                        killset = killtest # Update killset if this test model is better
-                        evmin = evtest
-                        xers = Xtest
-                        beters = betertest
-
-            # Apply the final killset to the main damtx after evaluating all potential removals
-            for k_idx in range(0, np.size(killset)):
-                damtx = np.delete(damtx, int(killset[k_idx]), 0) # Use 0-indexed killset directly
-
-            ev = evmin
-            X = xers
-
-            if self.ConsoleOutput:
-                if data.dtype != np.float64:
-                    sys.stdout.write('\r')
-                print([ind, float(ev)])
-
-            if np.size(evs) > 0:
-                if ev < np.min(evs):
-                    betas = beters
+                #         if aic:
+                #             evtest = evtest + (2 - np.log(n))*(damtest+1)
+                #         if evtest < evmin:
+                #             killset = killtest.tolist()
+                #             evmin = evtest
+                #             xers = Xtest
+                #             beters = betertest
+                
+                # # Apply the final killset
+                # if len(killset) > 0:
+                #     killset = np.array(killset)
+                #     for k_idx in range(0, killset.size):
+                #         damtx = np.delete(damtx, int(killset[k_idx]), 0)
+                
+                # ev = evmin
+                X = xers
+                
+                if self.ConsoleOutput:
+                    if data.dtype != np.float64:
+                        sys.stdout.write('\r')
+                    print([ind, entropy_level, float(ev)])
+                
+                # MOVED: Check stopping criteria after each entropy level
+                evs = np.append(evs, ev)  # Always append the current ev
+                
+                # print(f"Debug: ind={ind}, entropy_level={entropy_level}, ev={ev:.6f}, evs={evs}, greater={greater}")
+                
+                if np.size(evs) == 1:
+                    # First iteration - initialize
+                    # betas = beters
                     mtx = damtx
-                    greater = 1
-                    evs = np.append(evs, ev)
-                elif greater < tolerance:
-                    greater = greater + 1
-                    evs = np.append(evs, ev)
+                    greater = 0
+                    X_best = X
+                    # print(f"Debug: First iteration, greater reset to {greater}")
+                elif ev < np.min(evs[:-1]):  # Compare with previous best (excluding current)
+                    # New best found - reset counter and update best model
+                    # betas = beters
+                    mtx = damtx
+                    greater = 0
+                    X_best = X
+                    # print(f"Debug: New best found! ev={ev:.6f} < min(previous)={np.min(evs[:-1]):.6f}, greater reset to {greater}")
                 else:
-                    finished = 1
-                    evs = np.append(evs, ev)
-                    break # Break the main while True loop
-            else:
-                greater = greater + 1
-                betas = beters
-                mtx = damtx
-                evs = np.append(evs, ev)
-
-            # The old 'indvec' manipulation logic is completely removed.
-            # The 'ind' increment and loop break conditions are kept for the main loop.
+                    # No improvement - increment counter
+                    greater = greater + 1
+                    # print(f"Debug: No improvement. ev={ev:.6f} >= min(previous)={np.min(evs[:-1]):.6f}, greater incremented to {greater}")
+                    
+                    # Check if we've exceeded tolerance
+                    if greater >= tolerance:
+                        # print(f"Debug: Tolerance reached! greater={greater} >= tolerance={tolerance}")
+                        finished = 1
+                        break  # Break out of entropy level loop
+                
+                # Check if we should stop
+                if finished != 0:
+                    break  # Break out of entropy level loop
+            
+            # Check if we should stop (will be true if we broke out of entropy loop)
             if finished != 0:
+                break  # Break out of main ind loop
+            
+            ind = ind + 1
+            
+            if ind > len(phis):
                 break
 
-            ind = ind + 1 # Increment 'ind' to move to the next degree of interaction
-
-            if ind > len(phis): # Check if 'ind' has exceeded a maximum limit
-                break
+        # [beters, null_val1, null_val2, null_val3, xers, ev] = mf.gibbs(inputs, data, phis, X, damtx, a, b, atau, btau, draws,
+        #                                                                 phind, xsm, sigsqd0, tausqd0, dtd)
+       
+        [betas, sigs, taus] = mf.gibbs_sampling(X_best, data, a, b, atau, btau, draws, sigsqd0, tausqd0, dtd)
 
         # Implementation of 'gimme' feature
-        if gimmie:
-            betas = beters
-            mtx = damtx
+        # if gimmie:
+            # betas = beters
+            # mtx = damtx
 
         self.betas = betas[-self.draws::, :]  # discard 'burnin' draws by only keeping last 'draws' draws
         self.avg_betas = np.mean(self.betas, axis=0)
