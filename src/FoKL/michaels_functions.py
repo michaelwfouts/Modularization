@@ -3,45 +3,57 @@ import itertools
 import math
 from numpy import linalg as LA
 from scipy.linalg import eigh
+import numpy as np
+import itertools
+import sys
+from scipy.stats import entropy
 
-def perms(x):
-    """
-    Generates all unique permutations of the elements in a 1D array.
+"""
+INTERACTION MATRIX GENERATION FOR BASIS FUNCTION SELECTION
 
-    This function is a Python equivalent of MATLAB's 'perms' function,
-    but it also ensures that only unique permutations are returned.
+This module generates interaction matrices that specify which basis functions to include
+in a linear combination for the regression modeling applications.
 
-    Args:
-        x (np.ndarray): A 1D NumPy array whose elements will be permuted.
+OVERVIEW:
+The interaction matrix serves as a selection mechanism for basis functions in expansions
+of the form: 
+f(x1, x2, ..., xm) = Σ Σ c_i * φ_i(x_k) * φ_j(x_l)
 
-    Returns:
-        np.ndarray: A 2D NumPy array where each row is a unique permutation
-                    of the input array 'x'. The rows are reversed compared
-                    to the default itertools.permutations order.
-    """
-    # Generate all permutations as tuples
-    all_permutations = list(itertools.permutations(x))
+Each row of the interaction matrix represents a specific basis function selection pattern,
+where the values indicate which basis functions or interaction terms to activate.
 
-    # Stack them vertically into a NumPy array
-    # np.unique with axis=0 removes duplicate rows
-    # [::-1] reverses the order of the rows
-    unique_permutations = np.unique(np.vstack(all_permutations), axis=0)[::-1]
-    return unique_permutations
+WORKFLOW:
+1. Generate integer partitions of 'ind' into 'm' parts (selection patterns)
+2. Calculate entropy for each partition to measure complexity distribution
+3. Group partitions by entropy level for systematic exploration
+4. Generate all permutations of each partition pattern
+5. Apply relation-based filtering to remove unwanted selection patterns
+6. Sort and organize the final interaction matrix
+
+The resulting interaction matrix provides a structured approach to basis function
+selection, with entropy levels offering a natural progression for model complexity
+and systematic exploration of different interaction patterns.
+"""
 
 def _get_integer_partitions_fixed_parts(n, k):
     """
-    Recursively generates all unique partitions of integer n into k non-negative parts.
-    The order of parts within a partition does not matter (e.g., [1,2] is same as [2,1]).
-    Returns partitions as lists of integers, sorted in descending order to ensure uniqueness
-    of the base partition.
+    Recursively generates all unique partitions of an integer n into k non-negative parts.
+
+    This is a core function for generating the "building blocks" of the exponent vectors.
+    It finds all the different ways to break down a total degree 'n' into 'k' parts.
+    For example, for n=3 and k=3, it finds the unique partitions [3, 0, 0], [2, 1, 0], and [1, 1, 1].
+    The order of parts does not matter at this stage (e.g., [1, 2, 0] is considered the
+    same as [2, 1, 0]), which is why the parts are sorted to ensure that only
+    unique base partitions are returned.
 
     Args:
-        n (int): The integer to partition.
-        k (int): The fixed number of parts.
+        n (int): The integer to partition (the total degree of the polynomial term).
+        k (int): The fixed number of parts (the number of input variables).
 
     Returns:
         list of list of int: A list where each element is a unique partition
-                              of n into k parts, with parts sorted descending.
+                             of n into k parts. The parts within each partition
+                             are sorted in descending order.
     """
     if k == 0:
         return [[]] if n == 0 else []
@@ -58,114 +70,59 @@ def _get_integer_partitions_fixed_parts(n, k):
             partitions.add(tuple(sorted([i] + p, reverse=True)))
     return [list(p) for p in partitions]
 
-
-def generate_interaction_matrix(m, ind, relats):
+def perms(x):
     """
-    Generates and filters combinations of integer exponents for polynomial
-    regression interaction terms, forming an interaction matrix.
+    Generates all unique permutations of the elements in a 1D array.
 
-    This function generates all possible unique combinations of 'm' non-negative
-    integer exponents that sum up to 'ind', and then filters them based on
-    predefined relationships (relats).
+    This function is a Python equivalent of MATLAB's 'perms' function,
+    but it also ensures that only unique permutations are returned. It's
+    used to create all possible vectors for a given base partition.
+    For example, if the base partition is [2, 1, 0], this function will
+    generate all unique orderings like [2, 1, 0], [2, 0, 1], [1, 2, 0], etc.
+    Each of these permutations represents a unique polynomial term.
 
     Args:
-        m (int): The number of input variables (e.g., features in a model).
-                 This determines the length of the exponent vectors.
-        ind (int): The target sum for the exponents in each combination.
-                   This represents the 'degree' or 'order' of interaction
-                   being considered (e.g., ind=2 for quadratic terms or
-                   two-way interactions).
-        relats (np.ndarray): A 2D NumPy array containing 'relation' patterns.
-                             Each row is a binary vector (1s and 0s) that
-                             represents a forbidden or redundant pattern of
-                             active variables. If an interaction term's
-                             active variable pattern matches a row in 'relats',
-                             that term is filtered out. If 'relats' is empty,
-                             no filtering is performed.
+        x (np.ndarray): A 1D NumPy array (a partition) whose elements will be permuted.
 
     Returns:
-        np.ndarray: A 2D NumPy array (the 'interaction matrix' for this
-                    particular 'ind' value). Each row represents a unique
-                    and allowed combination of exponents for the 'm' input
-                    variables that sum up to 'ind'. Returns an empty array
-                    if no valid combinations are found after filtering.
+        np.ndarray: A 2D NumPy array where each row is a unique permutation
+                    of the input array 'x'. The rows are sorted in a specific
+                    way that is reversed compared to the default itertools.permutations order.
     """
-    # 1. Generate all unique base partitions of 'ind' into 'm' parts.
-    # Each partition is a unique set of exponents that sum to 'ind'.
-    # Example: for ind=4, m=3, this might return [[4,0,0], [3,1,0], [2,2,0], [2,1,1]]
-    base_partitions = _get_integer_partitions_fixed_parts(ind, m)
+    # Generate all permutations as tuples. If x is [1, 1, 0], it will generate
+    # (1, 1, 0), (1, 0, 1), (1, 1, 0), (1, 0, 1), etc.
+    all_permutations = list(itertools.permutations(x))
 
-    all_permutations_combined = []
-    # 2. For each base partition, generate all its unique permutations.
-    # These permutations represent all possible ways to assign the exponents
-    # from that partition to the 'm' input variables.
-    for partition_vec_list in base_partitions:
-        partition_vec_np = np.array(partition_vec_list, dtype=int)
-        # Get unique permutations for this specific partition
-        current_permutations = perms(partition_vec_np)
-        all_permutations_combined.append(current_permutations)
+    # Stack them vertically into a NumPy array and use np.unique with axis=0
+    # to find and remove any duplicate rows. The [::-1] then reverses the
+    # order of the unique rows.
+    unique_permutations = np.unique(np.vstack(all_permutations), axis=0)[::-1]
 
-    if not all_permutations_combined:
-        # If no partitions were generated, return an empty array of the correct shape
-        return np.array([], dtype=int).reshape(0, m)
-
-    # Combine all permutations and ensure overall uniqueness across all partitions
-    vecs = np.unique(np.vstack(all_permutations_combined), axis=0)
-
-    # Determine dimensions of vecs (still needed for subsequent loops)
-    mvec, nvec = np.shape(vecs) # nvec will always be 'm' here
-
-    kill_indices = [] # List to store indices of vectors to be removed
-
-    # 3. Filter permutations based on 'relats'
-    # This step removes terms that match predefined 'forbidden' patterns.
-    num_relations = relats.shape[0] # Inferred number of relations
-    if num_relations != 0: # Only filter if there are relation patterns
-        for j in range(mvec): # Iterate through each potential interaction term
-            # Create a binary 'testvec': 1 where original element is non-zero, 0 otherwise
-            # This identifies which input variables are 'active' in this term.
-            testvec = np.divide(vecs[j, :], vecs[j, :], where=vecs[j, :] != 0, out=np.zeros_like(vecs[j, :], dtype=float))
-            testvec[np.isnan(testvec)] = 0 # Replace NaN (from 0/0) with 0
-            testvec = testvec.astype(int) # Ensure it's integer type
-
-            for k in range(num_relations): # Iterate through each relation pattern
-                # Check if the current term's active variable pattern matches a relation
-                if np.sum(testvec == relats[k, :]) == m:
-                    kill_indices.append(j) # Mark this term for removal
-                    break # No need to check other relations for this term
-
-        # Create a new array 'nuvecs' containing only the allowed terms
-        # This handles the case where no vectors are killed or all are killed.
-        if len(kill_indices) == mvec: # If all vectors are killed
-            nuvecs = np.array([], dtype=int).reshape(0, m) # Return empty array with correct shape
-        else:
-            # Get a boolean mask for rows to keep
-            keep_mask = np.ones(mvec, dtype=bool)
-            keep_mask[kill_indices] = False
-            nuvecs = vecs[keep_mask]
-
-        vecs = nuvecs # Update 'vecs' to contain only the filtered terms
-
-    # 4. Return the processed interaction terms
-    return vecs.astype(int)
-
-import numpy as np
-import itertools
-import sys
-from scipy.stats import entropy
+    return unique_permutations
 
 def calculate_entropy(partition):
     """
-    Calculate the entropy of a partition to measure how evenly distributed
-    the exponents are across variables.
-    
+    Calculates the Shannon entropy of a partition to measure how evenly
+    distributed the exponents are across variables.
+
+    Entropy is a concept from information theory. In this context, it
+    serves as a measure of "balance" or "interactivity."
+    - A partition like [1, 1, 1, 1] would have high entropy because the total
+      degree is spread equally among all variables. This represents a complex,
+      multi-variable interaction.
+    - A partition like [4, 0, 0, 0] would have low entropy because the entire
+      degree is concentrated on a single variable, representing a simple,
+      non-interactive term.
+
     Args:
-        partition (list or np.ndarray): A partition/exponent vector
-        
+        partition (list or np.ndarray): A partition/exponent vector (e.g., [2, 1, 0]).
+
     Returns:
-        float: Entropy value (higher = more evenly distributed)
+        float: The entropy value (higher = more evenly distributed exponents).
     """
-    # Convert to numpy array and filter out zeros for entropy calculation
+    # Convert to a numpy array and filter out any zero values, as they
+    # don't contribute to the "information content" of the term's interaction.
+
     partition = np.array(partition)
     non_zero_values = partition[partition > 0]
     
@@ -184,7 +141,7 @@ def generate_interaction_matrix_by_entropy(m, ind, relats, entropy_level=None):
     
     Args:
         m (int): Number of input variables
-        ind (int): Target sum for exponents (degree/order)
+        ind (int): Target sum for polynomial degree
         relats (np.ndarray): Relation patterns for filtering
         entropy_level (int, optional): Specific entropy level to return.
                                      If None, returns all levels sorted by entropy.
@@ -292,30 +249,43 @@ def generate_interaction_matrix_by_entropy(m, ind, relats, entropy_level=None):
 # Convenience function to get all entropy levels for a given degree
 def get_entropy_levels(m, ind):
     """
-    Get information about available entropy levels for given parameters.
-    
+    Provides information about the different entropy levels available for a
+    given number of variables `m` and total degree `ind`.
+
+    This is a helper function designed to help the user understand the
+    structure of the generated terms. It lists the distinct entropy values
+    that exist for the given parameters and provides an example partition
+    for each level. This allows the user to choose which entropy level to
+    generate an interaction matrix for, effectively controlling the complexity
+    of the terms they are interested in.
+
     Args:
-        m (int): Number of input variables
-        ind (int): Target sum for exponents
-        
+        m (int): The number of input variables.
+        ind (int): The target sum for exponents (the total degree).
+
     Returns:
-        list: List of tuples (entropy_level, entropy_value, example_partitions)
+        list: A list of tuples. Each tuple contains:
+              (entropy_level_index, entropy_value, example_partitions)
     """
+    # First, get all the base partitions for the given parameters.
     base_partitions = _get_integer_partitions_fixed_parts(ind, m)
-    
+
     entropy_info = {}
     for partition in base_partitions:
+        # Calculate and round the entropy to group similar floating-point values.
         ent = round(calculate_entropy(partition), 6)
         if ent not in entropy_info:
             entropy_info[ent] = []
         entropy_info[ent].append(partition)
-    
+
+    # Sort the entropy values from highest to lowest.
     sorted_entropies = sorted(entropy_info.keys(), reverse=True)
-    
+
     result = []
+    # Create the final output list with the level index, value, and partitions.
     for i, ent_val in enumerate(sorted_entropies):
         result.append((i, ent_val, entropy_info[ent_val]))
-    
+
     return result
 
 import numpy as np
@@ -333,158 +303,52 @@ def evaluate_basis_bernoulli(coeffs, x):
     # This is a placeholder - replace with your actual implementation
     return sum(c * (x**i) for i, c in enumerate(coeffs))
 
-def gibbs(inputs, data, phis, Xin, discmtx, a, b, atau, btau, draws, phind, xsm, sigsqd, tausqd, dtd, kernel='Cubic Splines'):
-    """
-    'inputs' is the set of normalized inputs -- both parameters and model
-    inputs -- with columns corresponding to inputs and rows the different
-    experimental designs. (numpy array)
-
-    'data' are the experimental results: column vector, with entries
-    corresponding to rows of 'inputs'
-
-    'phis' are a data structure with the coefficients for the basis
-    functions
-
-    'discmtx' is the interaction matrix for the bss-anova function -- rows
-    are terms in the function and columns are inputs (cols should line up
-    with cols in 'inputs'
-
-    'a' and 'b' are the parameters of the ig distribution for the
-    observation error variance of the data
-
-    'atau' and 'btau' are the parameters of the ig distribution for the 'tau
-    squared' parameter: the variance of the beta priors
-
-    'draws' is the total number of draws
-
-    Additional Constants (to avoid repeat calculations found in later development):
-        - phind
-        - xsm
-        - sigsqd
-        - tausqd
-        - dtd
-    """
-    
-    # Define available kernels
-    kernels = ['Cubic Splines', 'Bernoulli Polynomials']
-    
-    # Define basis function evaluation
-    def evaluate_basis(coeffs, x):
-        if kernel == kernels[0]:  # 'Cubic Splines'
-            return evaluate_basis_cubic_splines(coeffs, x)
-        elif kernel == kernels[1]:  # 'Bernoulli Polynomials'
-            return evaluate_basis_bernoulli(coeffs, x)
-        else:
-            raise ValueError(f"Unknown kernel: {kernel}")
-    
-    # Rest of your function code remains the same, just remove all `self.` references
-    minp, ninp = np.shape(inputs)
-    phi_vec = []
-    if np.shape(discmtx) == ():
-        mmtx = 1
-    else:
-        mmtx, null = np.shape(discmtx)
-
-    if np.size(Xin) == 0:
-        Xin = np.ones((minp, 1))
-        mxin, nxin = np.shape(Xin)
-    else:
-        mxin, nxin = np.shape(Xin)
-    if mmtx - nxin < 0:
-        X = Xin
-    else:
-        X = np.append(Xin, np.zeros((minp, mmtx - nxin)), axis=1)
-
-    for i in range(minp):
-        for j in range(nxin, mmtx + 1):
-            null, nxin2 = np.shape(X)
-            if j == nxin2:
-                X = np.append(X, np.zeros((minp, 1)), axis=1)
-
-            phi = 1
-
-            for k in range(ninp):
-                if np.shape(discmtx) == ():
-                    num = discmtx
-                else:
-                    num = discmtx[j - 1][k]
-
-                if num != 0:
-                    nid = int(num - 1)
-
-                    if kernel == kernels[0]:  # 'Cubic Splines'
-                        coeffs = [phis[nid][order][phind[i, k]] for order in range(4)]
-                    elif kernel == kernels[1]:  # 'Bernoulli Polynomials'
-                        coeffs = phis[nid]
-                    
-                    phi = phi * evaluate_basis(coeffs, xsm[i, k])
-
-            X[i][j] = phi
-
-    # ... rest of your existing code (XtX calculation onwards) remains unchanged
-    XtX = np.transpose(X).dot(X)
-    Xty = np.transpose(X).dot(data)
-    
-    Lamb, Q = eigh(XtX)
-    Lamb_inv = np.diag(1 / Lamb)
-    
-    betahat = Q.dot(Lamb_inv).dot(np.transpose(Q)).dot(Xty)
-    squerr = LA.norm(data - X.dot(betahat)) ** 2
-    
-    n = len(data)
-    astar = a + 1 + n / 2 + (mmtx + 1) / 2
-    atau_star = atau + mmtx / 2
-    
-    betas = np.zeros((draws, mmtx + 1))
-    sigs = np.zeros((draws, 1))
-    taus = np.zeros((draws, 1))
-    lik = np.zeros((draws, 1))
-    
-    for k in range(draws):
-        Lamb_tausqd = np.diag(Lamb) + (1 / tausqd) * np.identity(mmtx + 1)
-        Lamb_tausqd_inv = np.diag(1 / np.diag(Lamb_tausqd))
-        
-        mun = Q.dot(Lamb_tausqd_inv).dot(np.transpose(Q)).dot(Xty)
-        S = Q.dot(np.diag(np.diag(Lamb_tausqd_inv) ** (1 / 2)))
-        
-        vec = np.random.normal(loc=0, scale=1, size=(mmtx + 1, 1))
-        betas[k][:] = np.transpose(mun + sigsqd ** (1 / 2) * (S).dot(vec))
-        
-        vecc = mun - np.reshape(betas[k][:], (len(betas[k][:]), 1))
-        
-        bstar = b + 0.5 * (betas[k][:].dot(XtX.dot(np.transpose([betas[k][:]]))) - 2 * betas[k][:].dot(Xty) +
-                           dtd + betas[k][:].dot(np.transpose([betas[k][:]])) / tausqd)
-        
-        if bstar < 0:
-            sigsqd = math.nan
-        else:
-            sigsqd = 1 / np.random.gamma(astar, 1 / bstar)
-        
-        sigs[k] = sigsqd
-        
-        btau_star = (1/(2*sigsqd)) * (betas[k][:].dot(np.reshape(betas[k][:], (len(betas[k][:]), 1)))) + btau
-        
-        tausqd = 1 / np.random.gamma(atau_star, 1 / btau_star)
-        taus[k] = tausqd
-    
-    siglik = np.var(data - np.matmul(X, betahat))
-    lik = -(n / 2) * np.log(siglik) - (n - 1) / 2
-    ev = 3*(mmtx + 1) * np.log(n) - 2 * np.max(lik)
-    
-    X = X[:, 0:mmtx + 1]
-    
-    return betas, sigs, taus, betahat, X, ev
-
 def build_design_matrix(inputs, phis, Xin, discmtx, phind, xsm, kernel='Cubic Splines'):
     """
-    Build the design matrix X for the regression model.
-    
+    Build the design matrix X for the regression model using a specified kernel.
+
+    This function constructs the design matrix, where each column corresponds to a basis function
+    from a specified kernel (e.g., Cubic Splines or Bernoulli Polynomials). The values in the
+    matrix are the evaluations of these basis functions at the given input points. The function
+    handles both single and multi-dimensional interactions as defined by the `discmtx`
+    (interaction matrix).
+
+    Parameters:
+    -----------
+    inputs : numpy array
+        Normalized inputs (parameters and model inputs) with shape `(minp, ninp)`.
+    phis : list or numpy array
+        A data structure containing the coefficients for the basis functions. The structure
+        depends on the chosen `kernel`. For 'Cubic Splines', it's a nested list of coefficients
+        for each segment. For 'Bernoulli Polynomials', it's a list of coefficients.
+    Xin : numpy array
+        A pre-defined design matrix.  If a portion of the model is already solved for, to prevent
+        the calculations from being repeated, this gives the evaluation values so only 
+        the new basis functions need to be evaluated. If `Xin` is empty, everything will be 
+        calculated.
+    discmtx : numpy array
+        The interaction matrix that defines which basis functions (from `phis`) are combined
+        to form the columns of the design matrix. Each row of `discmtx` corresponds to a
+        basis function in the design matrix, and the values in the row indicate which
+        single-variable basis functions are to be multiplied together. A value of 0 indicates
+        no interaction for that input variable.
+    phind : numpy array
+        Phase indices that map each input point to a specific segment of the basis function.
+        Used primarily for 'Cubic Splines'.
+    xsm : numpy array
+        Scaled input values, which are used to evaluate the basis functions.
+    kernel : str, optional
+        The type of basis function to use. Supported options are 'Cubic Splines' and
+        'Bernoulli Polynomials'. Defaults to 'Cubic Splines'.
+
     Returns:
     --------
     X : numpy array
-        Design matrix
+        The constructed design matrix with shape `(minp, mmtx + 1)`.
     mmtx : int
-        Number of basis functions
+        The number of basis functions (columns) generated from the interaction matrix.
+        Note that the final design matrix `X` will have `mmtx + 1` columns if `Xin`
+        is an empty array, accounting for the intercept.
     """
     kernels = ['Cubic Splines', 'Bernoulli Polynomials']
     
@@ -514,6 +378,7 @@ def build_design_matrix(inputs, phis, Xin, discmtx, phind, xsm, kernel='Cubic Sp
     else:
         X = np.append(Xin, np.zeros((minp, mmtx - nxin)), axis=1)
 
+    # The loop constructs the columns of X corresponding to the basis functions defined by discmtx.
     for i in range(minp):
         for j in range(nxin, mmtx + 1):
             null, nxin2 = np.shape(X)
@@ -550,9 +415,9 @@ def calculate_bic(inputs, data, phis, Xin, discmtx, phind, xsm, kernel='Cubic Sp
     Parameters:
     -----------
     inputs : numpy array
-        Normalized inputs (parameters and model inputs)
+        Normalized inputs
     data : numpy array
-        Experimental results
+        Experimental results (y values)
     phis : data structure
         Coefficients for basis functions
     Xin : numpy array
@@ -575,90 +440,115 @@ def calculate_bic(inputs, data, phis, Xin, discmtx, phind, xsm, kernel='Cubic Sp
     X : numpy array
         Design matrix
     """
-    # Build design matrix
+    # Build design matrix based on the current interaction matrix.
     X, mmtx = build_design_matrix(inputs, phis, Xin, discmtx, phind, xsm, kernel)
     
-    # Calculate coefficients using least squares
+    # Perform least squares regression to find coefficients.
+    # The normal equations are X.T * X * beta_hat = X.T * y.
     XtX = np.transpose(X).dot(X)
     Xty = np.transpose(X).dot(data)
     
+    # Solve for beta_hat using a stable method involving eigendecomposition.
+    # (X.T*X)^-1 = Q * Lambda^-1 * Q.T
     Lamb, Q = eigh(XtX)
     Lamb_inv = np.diag(1 / Lamb)
-    
     betahat = Q.dot(Lamb_inv).dot(np.transpose(Q)).dot(Xty)
     
     # Calculate BIC
     n = len(data)
+    # Estimate the variance of the residuals (sigma^2_lik).
     siglik = np.var(data - np.matmul(X, betahat))
+    # Calculate the log-likelihood (part of the BIC formula).
     lik = -(n / 2) * np.log(siglik) - (n - 1) / 2
-    ev = 3*(mmtx + 1) * np.log(n) - 2 * np.max(lik)
+    # The BIC formula is BIC = k * ln(n) - 2 * ln(L_hat).
+    # Here, k is the number of parameters, which is (mmtx + 1).
+    ev = (mmtx + 1) * np.log(n) - 2 * np.max(lik)
     
     return ev, betahat, X
 
 def gibbs_sampling(X, data, a, b, atau, btau, draws, sigsqd, tausqd, dtd):
     """
-    Perform Gibbs sampling for Bayesian regression.
-    
+    Perform Gibbs sampling for Bayesian linear regression with hierarchical priors.
+
+    This function implements a Gibbs sampler to draw samples from the posterior distribution
+    of the regression coefficients ($\beta$), the observation error variance ($\sigma^2$), and
+    the prior variance for the coefficients ($\tau^2$). The model assumes a prior
+    distribution on $\beta$ that is Gaussian with variance $\tau^2 I$, and inverse-gamma
+    distributions for $\sigma^2$ and $\tau^2$. This is a standard hierarchical Bayesian
+    setup often used for variable selection or regularization.
+
     Parameters:
     -----------
     X : numpy array
-        Design matrix (from calculate_bic or build_design_matrix)
+        The design matrix for the regression.
     data : numpy array
-        Experimental results
-    betahat : numpy array
-        Initial coefficient estimates (from calculate_bic)
+        The observed data or response variable.
     a, b : float
-        Parameters of inverse gamma distribution for observation error variance
+        Parameters of the inverse-gamma prior for the observation error variance $\sigma^2$,
+        i.e., $\sigma^2 \sim \text{InvGamma}(a, b)$.
     atau, btau : float
-        Parameters of inverse gamma distribution for tau squared
+        Parameters of the inverse-gamma prior for the prior variance of coefficients $\tau^2$,
+        i.e., $\tau^2 \sim \text{InvGamma}(a_{tau}, b_{tau})$.
     draws : int
-        Number of Gibbs sampling draws
+        The number of iterations (samples) to draw from the posterior.
     sigsqd : float
-        Initial sigma squared value
+        Initial value for the observation error variance $\sigma^2$.
     tausqd : float
-        Initial tau squared value
+        Initial value for the prior variance of the coefficients $\tau^2$.
     dtd : float
-        Data transpose times data
-    
+        The dot product of the data vector with itself, i.e., $data^T data$. This is pre-calculated
+        to save computation inside the loop.
+
     Returns:
     --------
     betas : numpy array
-        Sampled regression coefficients
+        An array of shape `(draws, mmtx + 1)` containing the sampled regression coefficients
+        for each iteration.
     sigs : numpy array
-        Sampled sigma squared values
+        An array of shape `(draws, 1)` containing the sampled observation error variances $\sigma^2$.
     taus : numpy array
-        Sampled tau squared values
+        An array of shape `(draws, 1)` containing the sampled prior variances $\tau^2$.
     """
     minp, mmtx_plus_1 = np.shape(X)
     mmtx = mmtx_plus_1 - 1
     
-    # Pre-compute matrices
+    # Pre-compute matrices that are constant throughout the sampling.
     XtX = np.transpose(X).dot(X)
     Xty = np.transpose(X).dot(data)
-    
     Lamb, Q = eigh(XtX)
-    
     n = len(data)
+
+    # Pre-calculate the updated shape parameters for the inverse-gamma posteriors.
+    # The posterior for sigsqd is InvGamma(astar, bstar).
+    # The posterior for tausqd is InvGamma(atau_star, btau_star).
     astar = a + 1 + n / 2 + (mmtx + 1) / 2
     atau_star = atau + mmtx / 2
 
-    # Initialize storage for samples
+    # Initialize storage for the sampled values.
     betas = np.zeros((draws, mmtx + 1))
     sigs = np.zeros((draws, 1))
     taus = np.zeros((draws, 1))
 
     for k in range(draws):
-        # Sample beta
+        # 1. Sample beta from its posterior distribution (a multivariate normal).
+        # The posterior mean is given by mu_n = (X.T*X + (1/tausqd)*I)^-1 * X.T*y.
+        # The posterior covariance is given by Sigma_n = sigsqd * (X.T*X + (1/tausqd)*I)^-1.
+        # The code uses eigendecomposition for stable and efficient computation.
         Lamb_tausqd = np.diag(Lamb) + (1 / tausqd) * np.identity(mmtx + 1)
         Lamb_tausqd_inv = np.diag(1 / np.diag(Lamb_tausqd))
-
         mun = Q.dot(Lamb_tausqd_inv).dot(np.transpose(Q)).dot(Xty)
+
+        # S is the Cholesky-like decomposition of the posterior covariance matrix.
+        # Sigma_n = sigsqd * Q * Lamb_tausqd_inv * Q.T = sigsqd * S * S.T.
         S = Q.dot(np.diag(np.diag(Lamb_tausqd_inv) ** (1 / 2)))
 
+        # Sample beta using the reparameterization trick: beta = mu_n + sqrt(sigsqd) * S * Z,
+        # where Z is a vector of standard normal random variables.
         vec = np.random.normal(loc=0, scale=1, size=(mmtx + 1, 1))
         betas[k][:] = np.transpose(mun + sigsqd ** (1 / 2) * (S).dot(vec))
 
-        # Sample sigma squared
+        # 2. Sample sigma squared from its posterior (an inverse-gamma distribution).
+        # The updated scale parameter `bstar` depends on the most recently sampled beta.
         bstar = b + 0.5 * (betas[k][:].dot(XtX.dot(np.transpose([betas[k][:]]))) - 2 * betas[k][:].dot(Xty) +
                            dtd + betas[k][:].dot(np.transpose([betas[k][:]])) / tausqd)
 
@@ -669,7 +559,9 @@ def gibbs_sampling(X, data, a, b, atau, btau, draws, sigsqd, tausqd, dtd):
 
         sigs[k] = sigsqd
 
-        # Sample tau squared
+        # 3. Sample tau squared from its posterior (an inverse-gamma distribution).
+        # The updated scale parameter `btau_star` depends on the most recently sampled beta
+        # and sigma squared.
         btau_star = (1/(2*sigsqd)) * (betas[k][:].dot(np.reshape(betas[k][:], (len(betas[k][:]), 1)))) + btau
         tausqd = 1 / np.random.gamma(atau_star, 1 / btau_star)
         taus[k] = tausqd
